@@ -202,8 +202,9 @@ class Fiskalizacija
             curl_close($ch);
             return $this->parseResponse($response, $code);
         } else {
+            $error = curl_error($ch);
             curl_close($ch);
-            throw new Exception(curl_error($ch));
+            throw new Exception($error);
         }
 
     }
