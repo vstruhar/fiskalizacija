@@ -19,6 +19,8 @@ class Fiskalizacija
     public $certificate;
     private $security;
     private $url = "https://cis.porezna-uprava.hr:8449/FiskalizacijaService";
+    private $privateKeyResource;
+    private $publicCertificateData;
 
     public function __construct($path, $pass, $security = 'SSL', $demo = false)
     {
@@ -33,11 +35,14 @@ class Fiskalizacija
 
     public function setCertificate($path, $pass)
     {
-        $pkcs12 = $this->readCertificateFromDisk($path);
-        openssl_pkcs12_read($pkcs12, $this->certificate, $pass);
+        try {
+            $pkcs12 = $this->readCertificateFromDisk($path);
+            openssl_pkcs12_read($pkcs12, $this->certificate, $pass);
+        } catch (Exception $e) {
+        }
     }
 
-    public function readCertificateFromDisk($path)
+    public function readCertificateFromDisk($path): string
     {
         $cert = @file_get_contents($path);
         if (false === $cert) {
@@ -104,14 +109,14 @@ class Fiskalizacija
         $publicCertificatePureString = str_replace('-----BEGIN CERTIFICATE-----', '', $this->certificate['cert']);
         $publicCertificatePureString = str_replace('-----END CERTIFICATE-----', '', $publicCertificatePureString);
 
-        $this->signedInfoSignature = null;
+        $signedInfoSignature = null;
 
-        if (!openssl_sign($SignedInfoNode->C14N(true), $this->signedInfoSignature, $this->privateKeyResource, OPENSSL_ALGO_SHA1)) {
+        if (!openssl_sign($SignedInfoNode->C14N(true), $signedInfoSignature, $this->privateKeyResource, OPENSSL_ALGO_SHA1)) {
             throw new Exception('Unable to sign the request');
         }
 
         $SignatureNode = $XMLRequestDOMDoc->getElementsByTagName('Signature')->item(0);
-        $SignatureValueNode = new DOMElement('SignatureValue', base64_encode($this->signedInfoSignature));
+        $SignatureValueNode = new DOMElement('SignatureValue', base64_encode($signedInfoSignature));
         $SignatureNode->appendChild($SignatureValueNode);
 
         $KeyInfoNode = $SignatureNode->appendChild(new DOMElement('KeyInfo'));
@@ -128,20 +133,7 @@ class Fiskalizacija
         $X509SerialNumberNode = new DOMElement('X509SerialNumber', $X509IssuerSerial);
         $X509IssuerSerialNode->appendChild($X509SerialNumberNode);
 
-        $envelope = new DOMDocument();
-
-        $envelope->loadXML('<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
-		    <soapenv:Body></soapenv:Body>
-		</soapenv:Envelope>');
-
-        $envelope->encoding = 'UTF-8';
-        $envelope->version = '1.0';
-        $XMLRequestType = $XMLRequestDOMDoc->documentElement->localName;
-        $XMLRequestTypeNode = $XMLRequestDOMDoc->getElementsByTagName($XMLRequestType)->item(0);
-        $XMLRequestTypeNode = $envelope->importNode($XMLRequestTypeNode, true);
-
-        $envelope->getElementsByTagName('Body')->item(0)->appendChild($XMLRequestTypeNode);
-        return $envelope->saveXML();
+        return $this->createEnvelope($XMLRequestDOMDoc);
     }
 
     public function plainXML($XMLRequest)
@@ -149,6 +141,11 @@ class Fiskalizacija
         $XMLRequestDOMDoc = new DOMDocument();
         $XMLRequestDOMDoc->loadXML($XMLRequest);
 
+        return $this->createEnvelope($XMLRequestDOMDoc);
+    }
+
+    private function createEnvelope($XMLRequestDOMDoc)
+    {
         $envelope = new DOMDocument();
 
         $envelope->loadXML('<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
@@ -156,7 +153,7 @@ class Fiskalizacija
 		</soapenv:Envelope>');
 
         $envelope->encoding = 'UTF-8';
-        $envelope->version = '1.0';
+        $envelope->xmlVersion = '1.0';
         $XMLRequestType = $XMLRequestDOMDoc->documentElement->localName;
         $XMLRequestTypeNode = $XMLRequestDOMDoc->getElementsByTagName($XMLRequestType)->item(0);
         $XMLRequestTypeNode = $envelope->importNode($XMLRequestTypeNode, true);
@@ -165,7 +162,7 @@ class Fiskalizacija
         return $envelope->saveXML();
     }
 
-    public function sendSoap($payload)
+    public function sendSoap($payload): array
     {
         $ch = curl_init();
 
@@ -209,7 +206,7 @@ class Fiskalizacija
 
     }
 
-    public function parseResponse($response, $code = 4)
+    public function parseResponse($response, $code = 4): array
     {
         if ($code === 200) {
             $DOMResponse = new DOMDocument();
@@ -241,4 +238,11 @@ class Fiskalizacija
 
     }
 
+    /**
+     * @return string
+     */
+    public function getUrl(): string
+    {
+        return $this->url;
+    }
 }
