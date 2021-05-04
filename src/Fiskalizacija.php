@@ -19,8 +19,6 @@ class Fiskalizacija
     public $certificate;
     private $security;
     private $url = "https://cis.porezna-uprava.hr:8449/FiskalizacijaService";
-    private $privateKeyResource;
-    private $publicCertificateData;
 
     public function __construct($path, $pass, $security = 'SSL', $demo = false)
     {
@@ -35,14 +33,11 @@ class Fiskalizacija
 
     public function setCertificate($path, $pass)
     {
-        try {
-            $pkcs12 = $this->readCertificateFromDisk($path);
-            openssl_pkcs12_read($pkcs12, $this->certificate, $pass);
-        } catch (Exception $e) {
-        }
+        $pkcs12 = $this->readCertificateFromDisk($path);
+        openssl_pkcs12_read($pkcs12, $this->certificate, $pass);
     }
 
-    public function readCertificateFromDisk($path): string
+    public function readCertificateFromDisk($path)
     {
         $cert = @file_get_contents($path);
         if (false === $cert) {
@@ -98,25 +93,25 @@ class Fiskalizacija
         $SignedInfoNode = $XMLRequestDOMDoc->getElementsByTagName('SignedInfo')->item(0);
 
         $X509Issuer = $this->publicCertificateData['issuer'];
-        $X509IssuerName = sprintf(
-            'OU=%s,O=%s,C=%s',
-            $X509Issuer['OU'] ?? '',
-            $X509Issuer['O'] ?? '',
-            $X509Issuer['C'] ?? ''
-        );
+
+        //dd($X509Issuer);
+        //$X509Issuer['OU'] = 'DEMO';
+
+        $X509IssuerName = sprintf('CN=%s,O=%s,C=%s', $X509Issuer['CN'], $X509Issuer['O'], $X509Issuer['C']);
+        
         $X509IssuerSerial = $this->publicCertificateData['serialNumber'];
 
         $publicCertificatePureString = str_replace('-----BEGIN CERTIFICATE-----', '', $this->certificate['cert']);
         $publicCertificatePureString = str_replace('-----END CERTIFICATE-----', '', $publicCertificatePureString);
 
-        $signedInfoSignature = null;
+        $this->signedInfoSignature = null;
 
-        if (!openssl_sign($SignedInfoNode->C14N(true), $signedInfoSignature, $this->privateKeyResource, OPENSSL_ALGO_SHA1)) {
+        if (!openssl_sign($SignedInfoNode->C14N(true), $this->signedInfoSignature, $this->privateKeyResource, OPENSSL_ALGO_SHA1)) {
             throw new Exception('Unable to sign the request');
         }
 
         $SignatureNode = $XMLRequestDOMDoc->getElementsByTagName('Signature')->item(0);
-        $SignatureValueNode = new DOMElement('SignatureValue', base64_encode($signedInfoSignature));
+        $SignatureValueNode = new DOMElement('SignatureValue', base64_encode($this->signedInfoSignature));
         $SignatureNode->appendChild($SignatureValueNode);
 
         $KeyInfoNode = $SignatureNode->appendChild(new DOMElement('KeyInfo'));
@@ -126,26 +121,16 @@ class Fiskalizacija
         $X509DataNode->appendChild($X509CertificateNode);
 
         $X509IssuerSerialNode = $X509DataNode->appendChild(new DOMElement('X509IssuerSerial'));
+        
 
         $X509IssuerNameNode = new DOMElement('X509IssuerName', $X509IssuerName);
         $X509IssuerSerialNode->appendChild($X509IssuerNameNode);
 
-        $X509SerialNumberNode = new DOMElement('X509SerialNumber', $X509IssuerSerial);
+        //$X509SerialNumberNode = new DOMElement('X509SerialNumber', $X509IssuerSerial);
+        $X509SerialNumberNode = new DOMElement('X509SerialNumber',sprintf('%u',hexdec($X509IssuerSerial)));
+
         $X509IssuerSerialNode->appendChild($X509SerialNumberNode);
 
-        return $this->createEnvelope($XMLRequestDOMDoc);
-    }
-
-    public function plainXML($XMLRequest)
-    {
-        $XMLRequestDOMDoc = new DOMDocument();
-        $XMLRequestDOMDoc->loadXML($XMLRequest);
-
-        return $this->createEnvelope($XMLRequestDOMDoc);
-    }
-
-    private function createEnvelope($XMLRequestDOMDoc)
-    {
         $envelope = new DOMDocument();
 
         $envelope->loadXML('<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
@@ -153,7 +138,7 @@ class Fiskalizacija
 		</soapenv:Envelope>');
 
         $envelope->encoding = 'UTF-8';
-        $envelope->xmlVersion = '1.0';
+        $envelope->version = '1.0';
         $XMLRequestType = $XMLRequestDOMDoc->documentElement->localName;
         $XMLRequestTypeNode = $XMLRequestDOMDoc->getElementsByTagName($XMLRequestType)->item(0);
         $XMLRequestTypeNode = $envelope->importNode($XMLRequestTypeNode, true);
@@ -162,7 +147,28 @@ class Fiskalizacija
         return $envelope->saveXML();
     }
 
-    public function sendSoap($payload): array
+    public function plainXML($XMLRequest)
+    {
+        $XMLRequestDOMDoc = new DOMDocument();
+        $XMLRequestDOMDoc->loadXML($XMLRequest);
+
+        $envelope = new DOMDocument();
+
+        $envelope->loadXML('<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">
+		    <soapenv:Body></soapenv:Body>
+		</soapenv:Envelope>');
+
+        $envelope->encoding = 'UTF-8';
+        $envelope->version = '1.0';
+        $XMLRequestType = $XMLRequestDOMDoc->documentElement->localName;
+        $XMLRequestTypeNode = $XMLRequestDOMDoc->getElementsByTagName($XMLRequestType)->item(0);
+        $XMLRequestTypeNode = $envelope->importNode($XMLRequestTypeNode, true);
+
+        $envelope->getElementsByTagName('Body')->item(0)->appendChild($XMLRequestTypeNode);
+        return $envelope->saveXML();
+    }
+
+    public function sendSoap($payload)
     {
         $ch = curl_init();
 
@@ -199,29 +205,16 @@ class Fiskalizacija
             curl_close($ch);
             return $this->parseResponse($response, $code);
         } else {
-            $error = curl_error($ch);
+            throw new Exception(curl_error($ch));
             curl_close($ch);
-            throw new Exception($error);
         }
 
     }
 
-    public function parseResponse($response, $code = 4): array
+    public function parseResponse($response, $code = 4)
     {
         if ($code === 200) {
-            $DOMResponse = new DOMDocument();
-            $DOMResponse->loadXML($response);
-
-            $uuid = $DOMResponse->getElementsByTagName('IdPoruke')->item(0)->nodeValue;
-            $dateTime = $DOMResponse->getElementsByTagName('DatumVrijeme')->item(0)->nodeValue;
-            $jir = $DOMResponse->getElementsByTagName('Jir')->item(0)->nodeValue;
-            return [
-                'header' => [
-                    'uuid' => $uuid,
-                    'dateTime' => $dateTime,
-                ],
-                'jir' => $jir
-            ];
+            return $response;
         } else {
             $DOMResponse = new DOMDocument();
             $DOMResponse->loadXML($response);
@@ -238,11 +231,4 @@ class Fiskalizacija
 
     }
 
-    /**
-     * @return string
-     */
-    public function getUrl(): string
-    {
-        return $this->url;
-    }
 }
